@@ -14,6 +14,12 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "/backups")
 RECOVERY_DIR = os.getenv("RECOVERY_DIR", "/recoveries")
 STATE_DB = os.getenv("STATE_DB", "/state/api.db")
 
+# 脱敏快照：发布文件目录与稳定匿名密钥（均在持久化卷上，重启后继续生效）
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/snapshots")
+ANON_KEY_FILE = os.getenv("ANON_KEY_FILE", "/state/anon.key")
+# 全量读取恢复实例的游标批次大小
+SNAPSHOT_FETCH_BATCH = int(os.getenv("SNAPSHOT_FETCH_BATCH", "1000"))
+
 # 恢复出来的独立只读实例监听地址（容器内）
 RECOVERY_HOST = os.getenv("RECOVERY_HOST", "127.0.0.1")
 RECOVERY_PORT = int(os.getenv("RECOVERY_PORT", "55433"))

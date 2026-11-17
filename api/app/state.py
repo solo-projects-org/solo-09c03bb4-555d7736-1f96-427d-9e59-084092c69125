@@ -47,12 +47,29 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at       TEXT NOT NULL,
     ready_at         TEXT
 );
+-- 脱敏快照：只记录匿名产物的元数据，原号、行号一律不入此表
+CREATE TABLE IF NOT EXISTS snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id        INTEGER NOT NULL,     -- 来源恢复任务
+    checkpoint_name TEXT NOT NULL,      -- 冗余记录，任务被取代后仍可追溯核对点
+    status        TEXT NOT NULL,        -- generating | published | failed
+    file_name     TEXT,                 -- 仅含快照 id，不含任何原号
+    row_count     INTEGER,
+    file_size     INTEGER,
+    sha256        TEXT,
+    detail        TEXT,
+    error         TEXT,
+    created_at    TEXT NOT NULL,
+    published_at  TEXT
+);
 """
 
 # 进行中（未终结）的任务状态：一次只允许一个
 ACTIVE_JOB_STATES = ("queued", "waiting_wal", "preparing", "recovering", "verifying")
 # 允许发起重试的终结状态
 RETRYABLE_JOB_STATES = ("failed", "stopped", "cancelled", "superseded")
+# 快照的终态
+SNAPSHOT_TERMINAL_STATES = ("published", "failed")
 
 
 def now() -> str:

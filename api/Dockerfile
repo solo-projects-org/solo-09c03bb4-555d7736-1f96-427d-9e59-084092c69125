@@ -13,8 +13,8 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 数据目录预建并归属 postgres（命名卷首次挂载会继承属主）
-RUN mkdir -p /backups /recoveries /state \
- && chown -R postgres:postgres /backups /recoveries /state
+RUN mkdir -p /backups /recoveries /state /snapshots \
+ && chown -R postgres:postgres /backups /recoveries /state /snapshots
 
 COPY app /opt/app
 RUN chown -R postgres:postgres /opt/app

@@ -368,6 +368,53 @@ def _query_conn() -> psycopg.Connection:
     )
 
 
+def _snapshot_conn() -> psycopg.Connection:
+    """快照全量读取连接：强制只读；不设短语句超时（全表扫描可能较久）。"""
+    return psycopg.connect(
+        host=config.RECOVERY_SOCKET_DIR,
+        port=config.RECOVERY_PORT,
+        dbname=config.SOURCE_DB,
+        user=config.SOURCE_USER,
+        password=config.SOURCE_PASSWORD,
+        autocommit=True,
+        connect_timeout=3,
+        application_name="pitr-api-snapshot",
+        options="-c default_transaction_read_only=on",
+        row_factory=dict_row,
+    )
+
+
+def count_all_samples() -> int:
+    """恢复实例样品总数（与流式读取交叉校验，截断即拒绝发布）。"""
+    con = _snapshot_conn()
+    try:
+        return con.execute("SELECT count(*) FROM public.samples").fetchone()[0]
+    finally:
+        con.close()
+
+
+def iter_all_samples(batch_size: int):
+    """流式遍历恢复实例中的全部样品（服务端命名游标分批，内存恒定）。
+
+    只 SELECT 脱敏所需的四列；主键行号 id 绝不取出，
+    排序仅借用 id 保证每次导出顺序确定，id 本身不离开数据库。
+    任何读取异常向上抛出，由快照模块判定本次发布失败、不留半份文件。
+    """
+    con = _snapshot_conn()
+    try:
+        cur = con.cursor(name="snapshot_scan")
+        cur.itersize = batch_size
+        cur.execute(
+            "SELECT sample_no, station_no, ph::float8 AS ph, created_at"
+            " FROM public.samples ORDER BY id"
+        )
+        for row in cur:
+            yield row
+    finally:
+        # psycopg3 的 with-conn 只结束事务不关闭连接，这里显式关闭
+        con.close()
+
+
 def fetch_samples(station_no: str | None, sample_no: str | None,
                   limit: int) -> list[dict]:
     sql = ("SELECT id, sample_no, station_no, ph::float8 AS ph, created_at"

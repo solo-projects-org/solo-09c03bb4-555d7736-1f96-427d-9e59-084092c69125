@@ -8,9 +8,10 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import backuper, config, recoverer, source, state
+from . import backuper, config, recoverer, snapshot, source, state
 from .walutil import lsn_to_int
 
 _stop = threading.Event()
@@ -23,6 +24,10 @@ DESCRIPTION = """
 * 恢复：基准备份 + 归档 WAL 重放到核对点（pause → 校验位点 → promote），
   产出**独立只读**实例；跨点后才提交的事务不会出现；
 * 查询：只打恢复实例，绝不用当前源库冒充恢复结果；
+* 脱敏快照：从已就绪恢复任务的只读库导出全部样品为 JSONL，
+  每行仅含样品号/站号各自的**稳定匿名标识**、pH 与入库时间，
+  原号与数据库行号不出现在文件和任何响应中；同一原号跨快照标识不变，
+  两个字段域分隔、同文也不共用标识；密钥持久化，重启后继续生效；
 * 一次只恢复一项；失败或重启后可按原核对点重试。
 """
 
@@ -75,10 +80,12 @@ def refresh_checkpoints() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    for d in (config.BACKUP_DIR, config.RECOVERY_DIR,
-              os.path.dirname(config.STATE_DB) or "."):
+    for d in (config.BACKUP_DIR, config.RECOVERY_DIR, config.SNAPSHOT_DIR,
+              os.path.dirname(config.STATE_DB) or ".",
+              os.path.dirname(config.ANON_KEY_FILE) or "."):
         os.makedirs(d, exist_ok=True)
     state.init_db()
+    snapshot.resume_after_restart()
     recoverer.resume_after_restart()
     threading.Thread(target=_refresher_loop, name="refresher", daemon=True).start()
     threading.Thread(target=recoverer.dispatch_loop, args=(_stop,),
@@ -137,7 +144,7 @@ def _ensure_no_active_job() -> None:
 def root():
     return {"service": "水质数仓 PITR 恢复服务", "docs": "/docs",
             "api": ["/api/health", "/api/basebackup", "/api/checkpoints",
-                    "/api/recoveries"]}
+                    "/api/recoveries", "/api/snapshots"]}
 
 
 @app.get("/api/health", summary="健康检查")
@@ -316,3 +323,59 @@ def adhoc_query(job_id: int, body: QueryIn):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"查询恢复实例失败: {e}")
     return {**_query_meta(job), "row_count": len(rows), "rows": rows}
+
+
+# ------------------------------------------------------------------ 脱敏快照
+
+def _snapshot_or_404(snapshot_id: int) -> dict:
+    snap = state.one_row("SELECT * FROM snapshots WHERE id=?", (snapshot_id,))
+    if not snap:
+        raise HTTPException(404, f"脱敏快照 #{snapshot_id} 不存在")
+    return snap
+
+
+@app.post("/api/recoveries/{job_id}/snapshots", tags=["snapshot"],
+          status_code=202,
+          summary="为已就绪恢复任务生成脱敏 JSONL 快照（后台异步，不发布半份）")
+def create_snapshot(job_id: int):
+    # 只有 ready 任务的只读实例可作为快照来源；被取代/停止后一律拒绝
+    _ready_job_or_409(job_id)
+    try:
+        sid = snapshot.start_snapshot(job_id)
+    except snapshot.BusyError as e:
+        raise HTTPException(409, str(e))
+    return state.one_row("SELECT * FROM snapshots WHERE id=?", (sid,))
+
+
+@app.get("/api/snapshots", tags=["snapshot"],
+         summary="脱敏快照列表（可按来源任务过滤；响应不含任何原号/行号）")
+def list_snapshots(job_id: int | None = Query(
+        None, description="按来源恢复任务过滤")):
+    if job_id is not None:
+        return state.all_rows(
+            "SELECT * FROM snapshots WHERE job_id=? ORDER BY id DESC", (job_id,))
+    return state.all_rows("SELECT * FROM snapshots ORDER BY id DESC LIMIT 100")
+
+
+@app.get("/api/snapshots/{snapshot_id}", tags=["snapshot"],
+         summary="脱敏快照状态（元数据仅含行数/大小/哈希，不含原号）")
+def get_snapshot(snapshot_id: int):
+    return _snapshot_or_404(snapshot_id)
+
+
+@app.get("/api/snapshots/{snapshot_id}/download", tags=["snapshot"],
+         summary="下载已发布的 JSONL 快照（发布后内容不再随源库/任务/重启变化）")
+def download_snapshot(snapshot_id: int):
+    snap = _snapshot_or_404(snapshot_id)
+    if snap["status"] != "published":
+        raise HTTPException(
+            409, f"快照未发布（当前状态 {snap['status']}），无法下载")
+    path = snapshot.file_path(snap["file_name"])
+    if not os.path.isfile(path):
+        raise HTTPException(500, "快照文件在存储中缺失，拒绝提供不完整内容")
+    # media_type 用通用类型，文件名只含快照 id，不含任何业务原号
+    return FileResponse(
+        path, media_type="application/x-ndjson",
+        filename=snap["file_name"],
+        headers={"X-Snapshot-Id": str(snap["id"]),
+                 "X-Snapshot-Sha256": snap["sha256"] or ""})

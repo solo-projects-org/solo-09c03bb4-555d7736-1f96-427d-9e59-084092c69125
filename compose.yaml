@@ -42,6 +42,8 @@ services:
       BACKUP_DIR: /backups
       RECOVERY_DIR: /recoveries
       STATE_DB: /state/api.db
+      ANON_KEY_FILE: /state/anon.key
+      SNAPSHOT_DIR: /snapshots
       RECOVERY_PORT: "55433"
       RECOVERY_TIMEOUT: "180"
     volumes:
@@ -49,6 +51,7 @@ services:
       - backups:/backups
       - recoveries:/recoveries
       - api_state:/state
+      - snapshots:/snapshots          # 已发布脱敏快照：独立持久卷，重启/取代不影响
     ports:
       - "8000:8000"
     depends_on:
@@ -61,3 +64,4 @@ volumes:
   backups:
   recoveries:
   api_state:
+  snapshots:
